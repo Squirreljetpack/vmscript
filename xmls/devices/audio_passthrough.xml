@@ -1,0 +1,8 @@
+<domain>
+  <devices>
+    <audio id="1" type="pipewire" runtimeDir="/run/user/1000" replace="audio"> 
+      <input name="qemuinput"/> 
+      <output name="qemuoutput"/> 
+    </audio> 
+  </devices>
+</domain>

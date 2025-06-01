@@ -1,0 +1,7 @@
+<domain>
+  <devices>
+    <video replace="video">
+      <model type='none'/>
+    </video>
+  </devices>
+</domain>

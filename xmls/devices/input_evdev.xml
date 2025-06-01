@@ -1,0 +1,10 @@
+<domain>
+  <devices>
+    <input type='evdev'>
+      <source dev='/dev/input/by-id/usb-Razer_Orochi_V2_000000000000-event-mouse'/>
+    </input>
+    <input type='evdev'>
+      <source dev='/dev/input/by-id/usb-ROYUAN_Akko_Multi-modes_Keyboard-B-event-kbd'/>
+    </input>
+  </devices>
+</domain>

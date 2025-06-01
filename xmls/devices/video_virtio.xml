@@ -1,0 +1,10 @@
+<domain>
+  <devices>
+    <video replace="video">
+      <model type="virtio" heads="1" primary="yes">
+        <acceleration accel3d="no"/>
+      </model>
+      <address type="pci" domain="0x0000" bus="0x0a" slot="0x00" function="0x0"/>
+    </video>
+  </devices>
+</domain>

@@ -1,0 +1,6 @@
+<disk type="block" device="disk">
+  <driver name="qemu" type="raw" cache="writeback" io="threads" discard="unmap" />
+  <source dev="/dev/disk/by-id/usb-WD_My_Book_25ED_3247473339344244-0:0" />
+  <target dev="sda" bus="scsi" />
+  <address type="drive" controller="0" bus="0" target="0" unit="0" />
+</disk>

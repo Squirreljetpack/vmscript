@@ -1,0 +1,490 @@
+#!/bin/zsh
+
+### Utils
+
+log_message() {
+  echo $1
+}
+
+notify () {
+  if command -v notify-send >/dev/null; then
+    notify-send $@
+  else
+    echo $@
+  fi
+}
+
+is_vm_running() {
+  $sudo virsh list --all | grep $VM_MACHINE | grep 'running' >/dev/null
+}
+
+
+unmount_disk() {
+  local disk=$1
+  # Try all partitions to unmount
+  for part in $disk*; do
+    output=$(umount $part) 
+    if ! (($?)) && ! grep -iE "not mounted|no such file|no mount point" <<<$output; then
+      log_message "Couldn't unmount $disk @ $part"
+      break
+      return 1
+    fi
+  done
+  log_message "$disk unmounted"
+}
+
+check_xml_devices() {
+  local device_paths device_path
+  device_paths="$(xmlstarlet sel -t -m "/domain/devices/*[source/@dev]" -v "source/@dev" -n $1 2>/dev/null)"
+
+  if [[ -z $device_paths ]]; then
+      return 0
+  fi
+  while IFS= read -r device_path; do
+    if [ ! -e $device_path ]; then
+      return 1
+    fi
+  done <<<$device_paths
+  return 0
+}
+
+unmount_xml_disks() {
+  local device_paths device_path
+  device_paths="$(xmlstarlet sel -t -m "/domain/devices/disk/source/@dev" -v "source/@dev" -n $1 2>/dev/null)"
+  if [[ -z $device_paths ]]; then
+      return 0
+  fi
+  while IFS= read -r device_path; do
+    unmount_disk $device_path || return 1
+  done <<<$device_paths
+  return 0
+}
+
+invalid_xml_err() {
+  echo "Error: Invalid XML $1" >&2
+  exit 1
+}
+
+
+### Subcommands
+
+# Creates an adjusted version of a default machine XML with disconnected devices removed, as well as adding valid modules in our machine's xml directory.
+prepare() {
+  [[ -e $XML_BASE_PATH ]] || echo "default XML not found at $XML_BASE_PATH"
+  cp -f $XML_BASE_PATH $XML_PATH
+
+  usbs=($(
+    xmlstarlet sel -t -m "/domain/devices/hostdev [@type='usb']" -v "source/vendor/@id" -o ":" -v "source/product/@id" -nl $XML_BASE_PATH |
+        sed -e 's/0x\([0-9a-f]*\)/\1/g'
+  ))
+
+  if (( ${#usbs[@]} )); then
+    echo \# Filtering usbs...
+    for usb in ${usbs[@]}; do
+        lsusb | grep -q $usb || {
+            notify "USB device $usb not connected right now, removing..."
+            vendor=$(echo $usb | cut -d':' -f1)
+            product=$(echo $usb | cut -d':' -f2)
+            xmlstarlet ed -O -d \"/domain/devices/hostdev[source/vendor/@id='0x$vendor'][source/product/@id='0x$product']\" $XML_PATH >$XML_PATH.b && 
+            mv $XML_PATH.b $XML_PATH
+        }
+    done
+    echo
+  fi
+
+  virsh define $XML_PATH --validate > /dev/null || invalid_xml_err "after filtering usbs."
+
+  disk_paths=($(xmlstarlet sel -t -m "/domain/devices/disk[@type='block']" -v "source/@dev" -nl $XML_BASE_PATH))
+  if (( ${#disk_paths[@]} )); then
+      echo \# Filtering disks...
+      for disk in ${disk_paths[@]}; do
+          # In clean mode, we run without any disks
+          if $VM_CLEAN || [[ ! -e "$disk" ]]; then
+              xmlstarlet ed -O -d "/domain/devices/disk[@type='block'][source/@dev='$disk']" $XML_PATH >$XML_PATH.b &&
+              mv $XML_PATH.b $XML_PATH
+              echo "Removed $disk"
+          else
+              echo "Kept $disk"
+          fi
+      done
+      echo
+  fi
+
+  virsh define $XML_PATH --validate > /dev/null || invalid_xml_err "after filtering disks."
+
+  if ! $VM_CLEAN; then
+    echo \# Checking xmls in "$VM_XML_DIR/$VM_MACHINE"...
+    for devicexml in "$VM_XML_DIR/$VM_MACHINE"/*.xml(N); do
+        [[ $devicexml == $XML_BASE_PATH || $devicexml == $XML_PATH ]] && continue
+        if check_xml_devices $devicexml; then
+          echo "Processing $devicexml"
+          root_element=$(xmlstarlet sel -t -v "name(/*)" "$devicexml")
+          if [[ $root_element == "domain" ]]; then
+              python $SCRIPT_DIR/mergexml.py $XML_PATH $devicexml
+          else
+              virsh define $XML_PATH
+              if virsh attach-device $VM_MACHINE --file $devicexml --config >/dev/null; then
+                virsh dumpxml $VM_MACHINE >$XML_PATH
+              else
+                invalid_xml_err "$device_xml, skipping."
+              fi
+          fi
+        else
+          echo "Skipping $devicexml because one or more devices are not available"
+        fi
+    done
+    echo
+  fi
+
+  virsh define $XML_PATH
+}
+
+# a simple cli menu for attaching usb devices (including while running!)
+attach_usb() {
+  IFS=$'\n'
+  usb_names=($(lsusb | cut -d' ' -f7-))
+  usb_ports=($(lsusb | cut -d' ' -f6))
+
+  (( "${#usb_names[@]}" )) || { echo "Error: No usbs found from lsusb"; exit 1; }
+
+  i=1
+  for n in "${usb_names[@]}"; do
+      echo "$i) $n (${usb_ports[(($i - 1))]})"
+      ((i++))
+  done
+
+  echo "Choose an index to attach to $VM_MACHINE"
+  read chosenidx
+  ((chosenidx--))
+
+  chosen_name=${usb_names[$chosenidx]}
+  chosen_ports=${usb_ports[$chosenidx]}
+  chosen_vendor=$(echo $chosen_ports | cut -d':' -f1)
+  chosen_id=$(echo $chosen_ports | cut -d':' -f2)
+
+  if ! is_vm_running; then
+      echo "VM shutdown, using virt-xml"
+      virt-xml $VM_MACHINE --add-device --hostdev $chosen_ports
+  else
+      echo "VM up and running, using attach-device"
+      virt-xml $VM_MACHINE --add-device --hostdev $chosen_ports
+  virsh attach-device $VM_MACHINE /dev/stdin <<EOF
+<hostdev mode='subsystem' type='usb' managed='yes'>
+  <source>
+      <vendor id='0x$chosen_vendor'/>
+      <product id='0x$chosen_id'/>
+    </source>
+</hostdev>
+EOF
+  fi && echo $chosen_name added successfully || echo Failed
+
+}
+
+# similar to the above
+detach_usb() {
+  IFS=$'\n'
+  usb_names=($(lsusb | cut -d' ' -f7-))
+  usb_ports=($(lsusb | cut -d' ' -f6))
+
+
+  defined_ports=($(virsh dumpxml $VM_MACHINE |
+        xmlstarlet sel -t -m "/domain/devices/hostdev [@type='usb']" -v "source/vendor/@id" -o ":" -v "source/product/@id" -nl |
+        sed -e 's/0x\([0-9a-f]*\)/\1/g'))
+
+    (( "${#usb_ports[@]}" )) || { echo "No usbs defined"; exit; }
+
+    i=1
+    for port in ${defined_ports[@]}; do
+        name=$(lsusb | grep $port | cut -d' ' -f7-)
+        echo "$i) $name ($port)"
+        ((i++))
+    done
+
+    echo "Choose an index to detach from $VM_MACHINE"
+    read chosenidx
+    ((chosenidx--))
+
+    chosen_name=${usb_names[$chosenidx]}
+    chosen_ports=${defined_ports[$chosenidx]}
+    chosen_vendor=$(echo $chosen_ports | cut -d':' -f1)
+    chosen_id=$(echo $chosen_ports | cut -d':' -f2)
+
+    if virsh detach-device $VM_MACHINE /dev/stdin <<EOF
+<hostdev mode='subsystem' type='usb' managed='yes'>
+    <source>
+        <vendor id='0x$chosen_vendor'/>
+        <product id='0x$chosen_id'/>
+    </source>
+</hostdev>
+EOF
+    then
+        echo removed $chosen_name
+    else
+        echo Failed to remove $chosen_name
+    fi
+}
+
+# overview of machine info
+info() {
+  # Reminder of relevant file locations
+  log_message "logs at /var/log/libvirt/qemu/"
+  log_message "conf at /etc/libvirt/libvirtd.conf, hooks at /etc/libvirt/hooks/qemu.d/$VM_MACHINE"
+  log_message "xml at /etc/libvirt/qemu/$VM_MACHINE.xml"
+  # print information about USB devices connected to the VM.
+  virsh qemu-monitor-command $VM_MACHINE --hmp 'info usb'
+}
+
+dump() {
+  virsh dumpxml $VM_MACHINE >$XML_BASE_PATH
+}
+
+shutdown() {
+  trap - EXIT SIGINT SIGTERM
+  if [ -t 0 ]; then
+    counter=0
+    while is_vm_running; do
+      log_message "Shutting down $VM_MACHINE."
+      $sudo timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE
+
+      if [[ $? -ne 0 || $counter -eq $VM_SHUTDOWN_TRIES ]]; then
+        print "After $(( counter * (VM_WAIT + VM_COMMAND_TIMEOUT) + VM_COMMAND_TIMEOUT )) seconds, $VM_MACHINE still has not shut down. Force off? [Y/n] "
+        read -r answer
+        if [[ -z "$answer" || $answer != ${answer#[Yy]} ]]; then
+          $sudo virsh destroy $VM_MACHINE
+          exit 0
+        fi
+      fi
+
+      sleep $VM_WAIT
+      ((counter++))
+    done
+
+  else
+    $sudo timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE
+
+    sleep $VM_WAIT
+    if is_vm_running; then
+      $sudo virsh destroy $VM_MACHINE
+      sleep $VM_WAIT
+      if is_vm_running; then
+        notify "VM could not be forced off"
+        return
+      fi
+    fi
+  fi
+  
+  sleep $VM_WAIT
+  notify "VM stopped" "$($sudo virsh list --all)"
+
+  if [ -t 0 ] && systemctl --user status gvfs-udisks2-volume-monitor &>/dev/null; then
+    systemctl --user restart gvfs-udisks2-volume-monitor
+  fi
+
+  log_message "Script completed or interrupted."
+}
+
+# a custom script to easily start a vm by running the prepare subcommand, unmounting all disks, starting looking-glass, and handling cleanup
+run() {
+
+  log_message "Starting $VM_MACHINE."
+  $sudo timeout $VM_COMMAND_TIMEOUT virsh list --all || exit 1
+
+  if ! [ -t 0 ]; then
+    log_message "Running in a non-interactive terminal with VM_CLEAN=$VM_CLEAN."
+  fi
+  $sudo DEBUG=$DEBUG $SCRIPT prepare $VM_MACHINE
+  unmount_xml_disks $XML_PATH
+
+  if is_vm_running; then
+    log_message "$VM_MACHINE already running!"
+    exit 0
+  else
+    $sudo timeout $VM_COMMAND_TIMEOUT virsh start $VM_MACHINE
+  fi
+
+  if [ $? -ne 0 ]; then
+    notify "Failed to start vm"
+    exit 1
+  fi
+
+  trap shutdown EXIT SIGINT SIGTERM
+
+  while ! is_vm_running; do
+    sleep $VM_WAIT
+  done
+  notify "VM started"
+
+  # technically this should be longer as we're waiting for vm startup
+  sleep $VM_WAIT
+
+  if [ -t 0 ] && $VM_LOOKING_GLASS; then
+    # Run looking-glass-client in workspace 5
+    wmctrl -s 5
+    log_message "Running looking-glass-client in fullscreen mode."
+    looking-glass-client -FXML_DIR
+
+    while is_vm_running; do
+      printf "Client closed. Restart client? [Y/n]: "
+      read -r ans
+      if [[ $ans == "" || $ans != ${ans#[Yy]} ]]; then
+        looking-glass-client -FXML_DIR
+      else
+        break
+      fi
+    done
+  fi
+}
+
+install_hooks() {
+  # only system qemu hooks supported
+  [[ $EUID -ne 0 ]] && { echo "Must be run as root or with sudo"; exit 1; }
+
+  local hooks=("vfio binding" "cpu governance")
+  local hook_dir="$SCRIPT_DIR/hooks"
+  local target_base="/etc/libvirt/hooks/qemu.d/$VM_MACHINE"
+
+  # Display list
+  for i in {1..${#hooks[@]}}; do
+    echo "$i) ${hooks[i]}"
+  done
+
+  # Prompt and split input
+  print -n "Enter hook numbers to install (space-separated): "
+  read -A choices
+
+  for n in $choices; do
+    case $hooks[$n] in
+      "vfio binding")
+        for file in bind_vfio.sh unbind_vfio.sh; do
+          target_file=""
+          [[ $file == bind_vfio.sh ]] && target_file="$target_base/prepare/begin/$file"
+          [[ $file == unbind_vfio.sh ]] && target_file="$target_base/release/end/$file"
+          if [[ -e $target_file ]]; then
+            echo "Replacing pre-existing hook: $target_file"
+            rm -f "$target_file"
+          fi
+        done
+        cp -f $hook_dir/bind_vfio.sh   $target_base/prepare/begin/
+        cp -f $hook_dir/unbind_vfio.sh $target_base/release/end/
+        chmod +x $target_base/prepare/begin/bind_vfio.sh \
+                $target_base/release/end/unbind_vfio.sh
+        ;;
+      "cpu governance")
+        for file in cpu_mode_performance.sh cpu_mode_ondemand.sh; do
+          target_file=""
+          [[ $file == cpu_mode_performance.sh ]] && target_file="$target_base/prepare/begin/$file"
+          [[ $file == cpu_mode_ondemand.sh ]] && target_file="$target_base/release/end/$file"
+          if [[ -e $target_file ]]; then
+            echo "Replacing pre-existing hook: $target_file"
+            rm -f "$target_file"
+          fi
+        done
+        cp -f $hook_dir/cpu_mode_performance.sh $target_base/prepare/begin/
+        cp -f $hook_dir/cpu_mode_ondemand.sh    $target_base/release/end/
+        chmod +x $target_base/prepare/begin/cpu_mode_performance.sh \
+                $target_base/release/end/cpu_mode_ondemand.sh
+        ;;
+      *)
+        echo "Invalid selection: $n"
+        ;;
+    esac
+  done
+}
+
+main() {
+  # logging
+  if [ ! -t 1 ]; then
+    # stdout is not a tty. Send all output to syslog.
+    coproc logger --tag "${PROG}"
+    exec >&${COPROC[1]} 2>&1
+  else
+    [[ $DEBUG == true ]] && set -x
+  fi
+
+  local cmd=$1
+  shift
+
+  ### CONSTANTS
+
+  # process long args to set constants
+  local args=()
+  while test $# -gt 0; do
+      case "$1" in
+          --xml-dir)
+              if [ "$#" -lt 2 ]; then
+                  echo "Missing argument for --xml-storage-dir" >&2
+                  exit 1
+              fi
+              XML_DIR="$2"
+              shift 2
+              ;;
+          --vm-wait)
+              if [ "$#" -lt 2 ]; then
+                  echo "Missing argument for --vm-wait" >&2
+                  exit 1
+              fi
+              VM_WAIT="$2"
+              shift 2
+              ;;
+          *)
+              args+=("$1")
+              shift
+              ;;
+      esac
+  done
+  set -- ${args[@]}
+
+  if [[ -n "$1" ]]; then
+      VM_MACHINE="$1"
+      shift 1
+  elif [ -z "$VM_MACHINE" ]; then
+      echo "No machine supplied" >&2
+      exit 1
+  fi
+
+  # constants configuring the prepare subcommand
+  : ${VM_XML_DIR:=$SCRIPT_DIR/../xmls}
+  XML_BASE_PATH=$VM_XML_DIR/$VM_MACHINE/$VM_MACHINE.xml
+  XML_PATH=$VM_XML_DIR/$VM_MACHINE/$VM_MACHINE.current.xml
+  [[ $VM_CLEAN != true ]] && VM_CLEAN=false
+
+  # constants configuring the run subcommand
+  : ${VM_WAIT:=5} # seconds to wait between checking status, such as whether vm is running
+  : ${VM_COMMAND_TIMEOUT:=15} # seconds to wait for virsh commands, such as listing, startup
+  : ${VM_SHUTDOWN_TRIES:=3}
+  [[ $VM_RUN_WITH_SUDO != false ]] && VM_RUN_WITH_SUDO=true
+  sudo=()
+  if [[ $VM_LOOKING_GLASS != false ]]; then
+    command -v looking-glass-client >/dev/null && VM_LOOKING_GLASS=true || VM_LOOKING_GLASS=false
+  fi
+
+
+
+
+  ### BEGIN
+  case $cmd in
+    prepare) prepare "$@" ;;
+    attach) attach_usb "$@" ;;
+    detach) detach_usb "$@" ;;
+    info) info "$@" ;;
+    run)
+      $VM_RUN_WITH_SUDO && sudo=sudo
+      run "$@" ;;
+    shutdown)
+      $VM_RUN_WITH_SUDO && sudo=sudo
+      shutdown "$@" ;;
+    hooks)
+      install_hooks "$@"
+    ;;
+    *)
+      echo "Usage: (sudo) vmscript [prepare|attach|detach|info|hooks|run|shutdown]"
+      exit 1
+      ;;
+  esac
+}
+
+SCRIPT="$(readlink -f -- "$0")"
+PROG="$(basename "$0")"
+SCRIPT_DIR="$(dirname -- $SCRIPT)"
+set -o pipefail
+main $@
