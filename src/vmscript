@@ -281,6 +281,7 @@ shutdown() {
   fi
 
   log_message "Script completed or interrupted."
+  exit
 }
 
 # a custom script to easily start a vm by running the prepare subcommand, unmounting all disks, starting looking-glass, and handling cleanup
@@ -292,12 +293,16 @@ run() {
   if ! [ -t 0 ]; then
     log_message "Running in a non-interactive terminal with VM_CLEAN=$VM_CLEAN."
   fi
-  $sudo DEBUG=$DEBUG $SCRIPT prepare $VM_MACHINE
+  $sudo DEBUG=$DEBUG VM_CLEAN=$VM_CLEAN $SCRIPT prepare $VM_MACHINE
   unmount_xml_disks $XML_PATH
 
   if is_vm_running; then
     log_message "$VM_MACHINE already running!"
-    exit 0
+    printf "Exit? [Y/n]: "
+    read -r ans
+    if [[ $ans == "" || $ans != ${ans#[Yy]} ]]; then
+      exit 0
+    fi
   else
     $sudo timeout $VM_COMMAND_TIMEOUT virsh start $VM_MACHINE
   fi
@@ -327,7 +332,7 @@ run() {
       printf "Client closed. Restart client? [Y/n]: "
       read -r ans
       if [[ $ans == "" || $ans != ${ans#[Yy]} ]]; then
-        looking-glass-client -FXML_DIR
+        looking-glass-client -F
       else
         break
       fi
@@ -450,8 +455,8 @@ main() {
 
   # constants configuring the run subcommand
   : ${VM_WAIT:=5} # seconds to wait between checking status, such as whether vm is running
-  : ${VM_COMMAND_TIMEOUT:=15} # seconds to wait for virsh commands, such as listing, startup
-  : ${VM_SHUTDOWN_TRIES:=3}
+  : ${VM_COMMAND_TIMEOUT:=30} # seconds to wait for virsh commands, such as listing, startup
+  : ${VM_SHUTDOWN_TRIES:=2}
   [[ $VM_RUN_WITH_SUDO != false ]] && VM_RUN_WITH_SUDO=true
   sudo=()
   if [[ $VM_LOOKING_GLASS != false ]]; then
