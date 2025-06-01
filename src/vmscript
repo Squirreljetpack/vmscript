@@ -68,6 +68,71 @@ invalid_xml_err() {
 
 ### Subcommands
 
+usage() {
+  echo "vmscript - An accessibility layer for vfio setups."
+  echo ""
+  echo "Usage: vmscript [options] <subcommand> [VM_MACHINE] [subcommand_options]"
+  echo ""
+  echo "Options:"
+  echo "  --xml-dir <path>            Sets VM_XML_DIR, determining to the path to the directory containing XML definitions. Defaults to '../xmls' relative to the script."
+  echo "  --wait <seconds>            Sets VM_WAIT, determining seconds to wait between status checks (e.g., for VM running). Defaults to 5."
+  echo "  --clean                     Sets VM_CLEAN to true, causing 'prepare' subcommand to remove all disk devices. Defaults to 'false'."
+  echo "  --command-timeout <seconds> Sets VM_COMMAND_TIMEOUT, determining seconds to wait for virsh commands. Defaults to 30."
+  echo "  --shutdown-tries <count>    Sets VM_SHUTDOWN_TRIES, determining number of shutdown attempts before offering to force off. Defaults to 2."
+  echo "  --no-run-with-sudo          Sets VM_RUN_WITH_SUDO to false, causing 'run' and 'shutdown' subcommands to not use sudo when invoking virsh. Defaults to 'true'."
+  echo "  --no-looking-glass false    Sets VM_LOOKING_GLASS to false, causing 'run' to start the client. Defaults to 'true' when conditions are met."
+  echo "  --help, -h                  Show this help message."
+  echo ""
+  echo "Additional environment variables:"
+  echo "  VM_MACHINE           Name of the VM to operate on (can also be passed as an argument)."
+  echo "  DEBUG                Defaults to 'false'."
+  echo ""
+  echo "Subcommands:"
+  echo "  prepare [VM_MACHINE]"
+  echo "    Prepares the VM's XML configuration from a base xml at \$VM_XML_DIR/\$VM_MACHINE/\$VM_MACHINE.xml (see dump subcommand) as follows:"
+  echo "    - filters out USB devices and block disk devices that are not currently"
+  echo "    connected or available on the host system."
+  echo "    - If VM_CLEAN is true, all disks are removed."
+  echo "    - merges additional XML definitions found in \$VM_XML_DIR/\$VM_MACHINE/*.xml"
+  echo "      - files featuring device definitions are included only when all devices referred to are present"
+  echo "      - The XML definitions can either be fully defined (starting from <domain>, see vmscript _mergexml --help for more details) or the kind of device fragments accepted by virsh attach-device"
+  echo ""
+  echo "  attach [VM_MACHINE]"
+  echo "    Interactively lists available USB devices on the host and allows you to select"
+  echo "    one to attach to the specified VM. Works whether the VM is running or shut down."
+  echo ""
+  echo "  detach [VM_MACHINE]"
+  echo "    Interactively lists USB devices currently defined for (or attached to) the VM"
+  echo "    and allows you to select one to detach. This will remove the device definition"
+  echo "    from the VM's configuration if it's shut down, or live-detach if running."
+  echo ""
+  echo "  info [VM_MACHINE]"
+  echo "    Displays information about the VM, including paths to log files, configuration files,"
+  echo "    hook directories and connected USB devices"
+  echo ""
+  echo "  dump [VM_MACHINE]"
+  echo "    Dumps the current live XML configuration of the VM to its base XML file."
+  echo "    The prepare subcommand can then logically modify this file with other xml modules."
+  echo ""
+  echo "  run [VM_MACHINE]"
+  echo "    Starts the VM:"
+  echo "    - Logs to systemctl (as well as stdout)"
+  echo "    - Invokes the prepare subcommand"
+  echo "    - unmounts any disks defined in the XML from the host system."
+  echo "    - Based on the value of VM_LOOKING_GLASS, starts a display client"
+  echo "    - invokes shutdown subcommand on script exit."
+  echo ""
+  echo "  shutdown [VM_MACHINE]"
+  echo "    Shuts down the VM gracefully."
+  echo "    In an interactive terminal:"
+  echo "    - if the VM doesn't shut down after VM_SHUTDOWN_TRIES, it will prompt to force off (virsh destroy)."
+  echo "    - restarts gvfs-udisks2-volume-monitor."
+  echo ""
+  echo "  hooks [VM_MACHINE]"
+  echo "    Presents a menu interface for installing from a collection of QEMU hooks to the VM."
+  echo ""
+}
+
 # Creates an adjusted version of a default machine XML with disconnected devices removed, as well as adding valid modules in our machine's xml directory.
 prepare() {
   [[ -e $XML_BASE_PATH ]] || echo "default XML not found at $XML_BASE_PATH"
@@ -409,6 +474,12 @@ main() {
   local cmd=$1
   shift
 
+  # provide an access point to the mergexml helper script
+  if [[ $cmd == _mergexml ]]; then
+    $SCRIPT_DIR/mergexml.py $@
+    exit
+  fi
+
   ### CONSTANTS
 
   # process long args to set constants
@@ -417,19 +488,45 @@ main() {
       case "$1" in
           --xml-dir)
               if [ "$#" -lt 2 ]; then
-                  echo "Missing argument for --xml-storage-dir" >&2
+                  echo "Missing argument for --xml-dir" >&2
                   exit 1
               fi
               XML_DIR="$2"
               shift 2
               ;;
-          --vm-wait)
+          --wait)
               if [ "$#" -lt 2 ]; then
-                  echo "Missing argument for --vm-wait" >&2
+                  echo "Missing argument for --wait" >&2
                   exit 1
               fi
               VM_WAIT="$2"
               shift 2
+              ;;
+          --command-timeout)
+              if [ "$#" -lt 2 ]; then echo "Missing argument for --command-timeout" >&2; exit 1; fi
+              VM_COMMAND_TIMEOUT="$2"
+              shift 2
+              ;;
+          --shutdown-tries)
+              if [ "$#" -lt 2 ]; then echo "Missing argument for --shutdown-tries" >&2; exit 1; fi
+              VM_SHUTDOWN_TRIES="$2"
+              shift 2
+              ;;
+          --clean)
+              VM_CLEAN=true
+              shift 1
+              ;;
+          --no-run-with-sudo)
+              VM_RUN_WITH_SUDO=false
+              shift 1
+              ;;
+          --no-looking-glass)
+              VM_LOOKING_GLASS=false
+              shift 1
+              ;;
+          -h|--help)
+              usage
+              exit 0
               ;;
           *)
               args+=("$1")
@@ -439,11 +536,17 @@ main() {
   done
   set -- ${args[@]}
 
+  if [[ -z "$cmd" ]]; then
+    usage
+    exit 1
+  fi
+
   if [[ -n "$1" ]]; then
       VM_MACHINE="$1"
       shift 1
-  elif [ -z "$VM_MACHINE" ]; then
-      echo "No machine supplied" >&2
+  elif [ -z "$VM_MACHINE" ] && [[ "$cmd" != "help" && "$cmd" != "-h" && "$cmd" != "--help" ]]; then # Allow no VM for help
+      echo "Error: No VM_MACHINE name supplied as argument or environment variable." >&2
+      usage
       exit 1
   fi
 
@@ -459,12 +562,13 @@ main() {
   : ${VM_SHUTDOWN_TRIES:=2}
   [[ $VM_RUN_WITH_SUDO != false ]] && VM_RUN_WITH_SUDO=true
   sudo=()
-  if [[ $VM_LOOKING_GLASS != false ]]; then
+
+  : ${VM_LOOKING_GLASS:=true}
+  if [[ "$VM_LOOKING_GLASS" == "true" ]]; then
     command -v looking-glass-client >/dev/null && VM_LOOKING_GLASS=true || VM_LOOKING_GLASS=false
+  else
+    VM_LOOKING_GLASS=false
   fi
-
-
-
 
   ### BEGIN
   case $cmd in
@@ -481,9 +585,15 @@ main() {
     hooks)
       install_hooks "$@"
     ;;
+    _mergexml)
+      install_hooks "$@"
+    ;;
+    help|-h|--help)
+      usage
+    ;;
     *)
-      echo "Usage: (sudo) vmscript [prepare|attach|detach|info|hooks|run|shutdown]"
-      exit 1
+      echo "Error: Unknown subcommand '$cmd'" >&2
+      usage
       ;;
   esac
 }
