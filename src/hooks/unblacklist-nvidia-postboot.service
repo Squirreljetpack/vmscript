@@ -1,0 +1,10 @@
+[Unit]
+Description=Unblacklist nvidia modules for current session
+After=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'mv /etc/modprobe.d/blacklist.conf{,.bak}; modprobe nvidia; mv /etc/modprobe.d/blacklist.conf{.bak,}; nvidia-smi && echo unblacklisted || echo initialization error'
+
+[Install]
+WantedBy=multi-user.target

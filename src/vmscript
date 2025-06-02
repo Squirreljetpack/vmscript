@@ -14,6 +14,13 @@ notify () {
   fi
 }
 
+assert_machine() {
+  [ -z "$VM_MACHINE" ] || return 0
+    echo "Error: No VM_MACHINE name supplied as argument or environment variable." >&2
+    usage
+  exit 1
+}
+
 is_vm_running() {
   $sudo virsh list --all | grep $VM_MACHINE | grep 'running' >/dev/null
 }
@@ -69,7 +76,7 @@ invalid_xml_err() {
 ### Subcommands
 
 usage() {
-  echo "vmscript - An accessibility layer for vfio setups."
+  echo "vmscript - An accessibility wrapper for vfio setups."
   echo ""
   echo "Usage: vmscript [options] <subcommand> [VM_MACHINE] [subcommand_options]"
   echo ""
@@ -89,13 +96,15 @@ usage() {
   echo ""
   echo "Subcommands:"
   echo "  prepare [VM_MACHINE]"
-  echo "    Prepares the VM's XML configuration from a base xml at \$VM_XML_DIR/\$VM_MACHINE/\$VM_MACHINE.xml (see dump subcommand) as follows:"
+  echo "    Prepares the VM's XML configuration from a base xml at \$VM_XML_DIR/\$VM_MACHINE/\$VM_MACHINE.xml"
+  echo "    (see dump subcommand) as follows:"
   echo "    - filters out USB devices and block disk devices that are not currently"
   echo "    connected or available on the host system."
   echo "    - If VM_CLEAN is true, all disks are removed."
   echo "    - merges additional XML definitions found in \$VM_XML_DIR/\$VM_MACHINE/*.xml"
   echo "      - files featuring device definitions are included only when all devices referred to are present"
-  echo "      - The XML definitions can either be fully defined (starting from <domain>, see vmscript _mergexml --help for more details) or the kind of device fragments accepted by virsh attach-device"
+  echo "      - The XML definitions can either be fully defined (see vmscript _mergexml --help for more details)"
+  echo "        or the kind of device fragments accepted by virsh attach-device"
   echo ""
   echo "  attach [VM_MACHINE]"
   echo "    Interactively lists available USB devices on the host and allows you to select"
@@ -128,8 +137,9 @@ usage() {
   echo "    - if the VM doesn't shut down after VM_SHUTDOWN_TRIES, it will prompt to force off (virsh destroy)."
   echo "    - restarts gvfs-udisks2-volume-monitor."
   echo ""
-  echo "  hooks [VM_MACHINE]"
-  echo "    Presents a menu interface for installing from a collection of QEMU hooks to the VM."
+  echo "  install [VM_MACHINE]"
+  echo "    Presents a menu interface for installing various collections of files, such as from a collection "
+  echo "    of QEMU hooks to the VM."
   echo ""
 }
 
@@ -405,13 +415,26 @@ run() {
   fi
 }
 
-install_hooks() {
-  # only system qemu hooks supported
+install_file() {
+  local target_file="$1"
+  local source_file="$source_dir/$(basename "$target_file")"
+
+  if [[ -e $target_file ]]; then
+    echo "Replacing pre-existing file: $target_file"
+    rm -f "$target_file"
+  else
+    echo "Installing $target_file"
+  fi
+
+  cp -f "$source_file" "$target_file"
+}
+
+install() {
   [[ $EUID -ne 0 ]] && { echo "Must be run as root or with sudo"; exit 1; }
 
-  local hooks=("vfio binding" "cpu governance")
-  local hook_dir="$SCRIPT_DIR/hooks"
-  local target_base="/etc/libvirt/hooks/qemu.d/$VM_MACHINE"
+  local hooks=("vfio binding" "cpu governance" "preboot nvidia blacklisting (systemd, Xorg)")
+  local source_dir="$SCRIPT_DIR/hooks"
+  local hooks_dir="/etc/libvirt/hooks/qemu.d/$VM_MACHINE"
 
   # Display list
   for i in {1..${#hooks[@]}}; do
@@ -419,40 +442,49 @@ install_hooks() {
   done
 
   # Prompt and split input
-  print -n "Enter hook numbers to install (space-separated): "
   read -A choices
+  echo -n "Enter hook numbers to install (space-separated): "
 
-  for n in $choices; do
-    case $hooks[$n] in
+  for n in ${choices[@]}; do
+    case ${hooks[n]} in
       "vfio binding")
-        for file in bind_vfio.sh unbind_vfio.sh; do
-          target_file=""
-          [[ $file == bind_vfio.sh ]] && target_file="$target_base/prepare/begin/$file"
-          [[ $file == unbind_vfio.sh ]] && target_file="$target_base/release/end/$file"
-          if [[ -e $target_file ]]; then
-            echo "Replacing pre-existing hook: $target_file"
-            rm -f "$target_file"
-          fi
+        assert_machine
+        for file in "$hooks_dir/prepare/begin/bind_vfio.sh" "$hooks_dir/release/end/unbind_vfio.sh"; do
+          install_file "$file"
+          chmod +x "$file"
         done
-        cp -f $hook_dir/bind_vfio.sh   $target_base/prepare/begin/
-        cp -f $hook_dir/unbind_vfio.sh $target_base/release/end/
-        chmod +x $target_base/prepare/begin/bind_vfio.sh \
-                $target_base/release/end/unbind_vfio.sh
         ;;
       "cpu governance")
-        for file in cpu_mode_performance.sh cpu_mode_ondemand.sh; do
-          target_file=""
-          [[ $file == cpu_mode_performance.sh ]] && target_file="$target_base/prepare/begin/$file"
-          [[ $file == cpu_mode_ondemand.sh ]] && target_file="$target_base/release/end/$file"
-          if [[ -e $target_file ]]; then
-            echo "Replacing pre-existing hook: $target_file"
-            rm -f "$target_file"
+        assert_machine
+        for file in "$hooks_dir/prepare/begin/cpu_mode_performance.sh" "$hooks_dir/release/end/cpu_mode_ondemand.sh"; do
+          install_file "$file"
+          chmod +x "$file"
+        done
+        ;;
+      "preboot nvidia blacklisting (systemd, Xorg)")
+        local blacklist_file="/etc/modprobe.d/blacklist.conf"
+        [[ ! -f $blacklist_file ]] && touch "$blacklist_file"
+
+        local blacklists=(
+          "install nvidia_uvm /bin/false"
+          "install nvidia_drm /bin/false"
+          "install nvidia_modeset /bin/false"
+          "install nvidia /bin/false"
+        )
+
+        local added=false
+        for line in ${blacklists[@]}; do
+          if ! grep -Fxq $line $blacklist_file; then
+            echo $line >> $blacklist_file
+            echo "Added: $line"
+            added=true
           fi
         done
-        cp -f $hook_dir/cpu_mode_performance.sh $target_base/prepare/begin/
-        cp -f $hook_dir/cpu_mode_ondemand.sh    $target_base/release/end/
-        chmod +x $target_base/prepare/begin/cpu_mode_performance.sh \
-                $target_base/release/end/cpu_mode_ondemand.sh
+        ! $added && echo "All blacklist entries already present in $blacklist_file"
+
+        install_file "/etc/systemd/system/unblacklist-nvidia-postboot.service"
+        systemctl daemon-reload
+        systemctl enable unblacklist-nvidia-postboot.service
         ;;
       *)
         echo "Invalid selection: $n"
@@ -464,9 +496,14 @@ install_hooks() {
 main() {
   # logging
   if [ ! -t 1 ]; then
-    # stdout is not a tty. Send all output to syslog.
-    coproc logger --tag "${PROG}"
-    exec >&${COPROC[1]} 2>&1
+    # stdout is not a tty. Redirect stdout/stderr to both logger and original TTY
+    exec 3>&1 4>&2
+
+    # Start coprocess for logger
+    coproc logger --tag "${PROG:-vmscript}"
+
+    exec > >(tee /dev/fd/3 > /dev/null >&p)
+    exec 2> >(tee /dev/fd/4 > /dev/null >&p)
   else
     [[ $DEBUG == true ]] && set -x
   fi
@@ -542,12 +579,10 @@ main() {
   fi
 
   if [[ -n "$1" ]]; then
-      VM_MACHINE="$1"
-      shift 1
-  elif [ -z "$VM_MACHINE" ] && [[ "$cmd" != "help" && "$cmd" != "-h" && "$cmd" != "--help" ]]; then # Allow no VM for help
-      echo "Error: No VM_MACHINE name supplied as argument or environment variable." >&2
-      usage
-      exit 1
+    VM_MACHINE="$1"
+    shift 1
+  elif ! [[ "$cmd" =~ ^(help|-h|--help|install)$ ]]; then
+    assert_machine
   fi
 
   # constants configuring the prepare subcommand
@@ -582,8 +617,8 @@ main() {
     shutdown)
       $VM_RUN_WITH_SUDO && sudo=sudo
       shutdown "$@" ;;
-    hooks)
-      install_hooks "$@"
+    install)
+      install "$@"
     ;;
     _mergexml)
       install_hooks "$@"
