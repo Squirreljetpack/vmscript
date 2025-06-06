@@ -16,9 +16,8 @@ notify () {
 
 assert_machine() {
   [ -z "$VM_MACHINE" ] || return 0
-    echo "Error: No VM_MACHINE name supplied as argument or environment variable." >&2
-    usage
-  exit 1
+  echo "Error: No VM_MACHINE name supplied as argument or environment variable." >&2
+  usage 1
 }
 
 is_vm_running() {
@@ -141,6 +140,8 @@ usage() {
   echo "    Presents a menu interface for installing various collections of files, such as from a collection "
   echo "    of QEMU hooks to the VM."
   echo ""
+
+  (($#)) && exit $1
 }
 
 # Creates an adjusted version of a default machine XML with disconnected devices removed, as well as adding valid modules in our machine's xml directory.
@@ -508,6 +509,8 @@ main() {
     [[ $DEBUG == true ]] && set -x
   fi
 
+  (($#)) || usage 1
+
   local cmd=$1
   shift
 
@@ -562,8 +565,7 @@ main() {
               shift 1
               ;;
           -h|--help)
-              usage
-              exit 0
+              usage 0
               ;;
           *)
               args+=("$1")
@@ -573,10 +575,7 @@ main() {
   done
   set -- ${args[@]}
 
-  if [[ -z "$cmd" ]]; then
-    usage
-    exit 1
-  fi
+  [[ -z "$cmd" ]] && usage 1
 
   if [[ -n "$1" ]]; then
     VM_MACHINE="$1"
@@ -624,11 +623,11 @@ main() {
       install_hooks "$@"
     ;;
     help|-h|--help)
-      usage
+      usage 0
     ;;
     *)
       echo "Error: Unknown subcommand '$cmd'" >&2
-      usage
+      usage 1
       ;;
   esac
 }
