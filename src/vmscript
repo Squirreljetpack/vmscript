@@ -8,7 +8,7 @@ log_message() {
 
 notify () {
   if command -v notify-send >/dev/null; then
-    notify-send $@
+    $nosudo DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS notify-send $@
   else
     echo $@
   fi
@@ -21,7 +21,7 @@ assert_machine() {
 }
 
 is_vm_running() {
-  $sudo virsh list --all | grep $VM_MACHINE | grep 'running' >/dev/null
+  virsh list --all | grep $VM_MACHINE | grep 'running' >/dev/null
 }
 
 
@@ -61,7 +61,7 @@ unmount_xml_disks() {
       return 0
   fi
   while IFS= read -r device_path; do
-    unmount_disk $device_path || return 1
+    unmount_disk $device_path || exit 1
   done <<<$device_paths
   return 0
 }
@@ -75,71 +75,73 @@ invalid_xml_err() {
 ### Subcommands
 
 usage() {
-  echo "vmscript - An accessibility wrapper for vfio setups."
-  echo ""
-  echo "Usage: vmscript [options] <subcommand> [VM_MACHINE] [subcommand_options]"
-  echo ""
-  echo "Options:"
-  echo "  --xml-dir <path>            Sets VM_XML_DIR, determining to the path to the directory containing XML definitions. Defaults to '../xmls' relative to the script."
-  echo "  --wait <seconds>            Sets VM_WAIT, determining seconds to wait between status checks (e.g., for VM running). Defaults to 5."
-  echo "  --clean                     Sets VM_CLEAN to true, causing 'prepare' subcommand to remove all disk devices. Defaults to 'false'."
-  echo "  --command-timeout <seconds> Sets VM_COMMAND_TIMEOUT, determining seconds to wait for virsh commands. Defaults to 30."
-  echo "  --shutdown-tries <count>    Sets VM_SHUTDOWN_TRIES, determining number of shutdown attempts before offering to force off. Defaults to 2."
-  echo "  --no-run-with-sudo          Sets VM_RUN_WITH_SUDO to false, causing 'run' and 'shutdown' subcommands to not use sudo when invoking virsh. Defaults to 'true'."
-  echo "  --no-looking-glass false    Sets VM_LOOKING_GLASS to false, causing 'run' to start the client. Defaults to 'true' when conditions are met."
-  echo "  --help, -h                  Show this help message."
-  echo ""
-  echo "Additional environment variables:"
-  echo "  VM_MACHINE           Name of the VM to operate on (can also be passed as an argument)."
-  echo "  DEBUG                Defaults to 'false'."
-  echo ""
-  echo "Subcommands:"
-  echo "  prepare [VM_MACHINE]"
-  echo "    Prepares the VM's XML configuration from a base xml at \$VM_XML_DIR/\$VM_MACHINE/\$VM_MACHINE.xml"
-  echo "    (see dump subcommand) as follows:"
-  echo "    - filters out USB devices and block disk devices that are not currently"
-  echo "    connected or available on the host system."
-  echo "    - If VM_CLEAN is true, all disks are removed."
-  echo "    - merges additional XML definitions found in \$VM_XML_DIR/\$VM_MACHINE/*.xml"
-  echo "      - files featuring device definitions are included only when all devices referred to are present"
-  echo "      - The XML definitions can either be fully defined (see vmscript _mergexml --help for more details)"
-  echo "        or the kind of device fragments accepted by virsh attach-device"
-  echo ""
-  echo "  attach [VM_MACHINE]"
-  echo "    Interactively lists available USB devices on the host and allows you to select"
-  echo "    one to attach to the specified VM. Works whether the VM is running or shut down."
-  echo ""
-  echo "  detach [VM_MACHINE]"
-  echo "    Interactively lists USB devices currently defined for (or attached to) the VM"
-  echo "    and allows you to select one to detach. This will remove the device definition"
-  echo "    from the VM's configuration if it's shut down, or live-detach if running."
-  echo ""
-  echo "  info [VM_MACHINE]"
-  echo "    Displays information about the VM, including paths to log files, configuration files,"
-  echo "    hook directories and connected USB devices"
-  echo ""
-  echo "  dump [VM_MACHINE]"
-  echo "    Dumps the current live XML configuration of the VM to its base XML file."
-  echo "    The prepare subcommand can then logically modify this file with other xml modules."
-  echo ""
-  echo "  run [VM_MACHINE]"
-  echo "    Starts the VM:"
-  echo "    - Logs to systemctl (as well as stdout)"
-  echo "    - Invokes the prepare subcommand"
-  echo "    - unmounts any disks defined in the XML from the host system."
-  echo "    - Based on the value of VM_LOOKING_GLASS, starts a display client"
-  echo "    - invokes shutdown subcommand on script exit."
-  echo ""
-  echo "  shutdown [VM_MACHINE]"
-  echo "    Shuts down the VM gracefully."
-  echo "    In an interactive terminal:"
-  echo "    - if the VM doesn't shut down after VM_SHUTDOWN_TRIES, it will prompt to force off (virsh destroy)."
-  echo "    - restarts gvfs-udisks2-volume-monitor."
-  echo ""
-  echo "  install [VM_MACHINE]"
-  echo "    Presents a menu interface for installing various collections of files, such as from a collection "
-  echo "    of QEMU hooks to the VM."
-  echo ""
+  {
+    echo "$PROG - An accessibility wrapper for vfio setups."
+    echo ""
+    echo "Usage: vmscript [options] <subcommand> [VM_MACHINE] [subcommand_options]"
+    echo ""
+    echo "Options:"
+    echo "  --xml-dir <path>            Sets VM_XML_DIR, determining to the path to the directory containing XML definitions. Defaults to '../xmls' relative to the script."
+    echo "  --wait <seconds>            Sets VM_WAIT, determining seconds to wait between status checks (e.g., for VM running). Defaults to 5."
+    echo "  --clean                     Sets VM_CLEAN to true, causing 'prepare' subcommand to remove all disk devices. Defaults to 'false'."
+    echo "  --command-timeout <seconds> Sets VM_COMMAND_TIMEOUT, determining seconds to wait for virsh commands. Defaults to 30."
+    echo "  --shutdown-tries <count>    Sets VM_SHUTDOWN_TRIES, determining number of shutdown attempts before offering to force off. Defaults to 2."
+    echo "  --no-run-with-sudo          Sets VM_RUN_WITH_SUDO to false, causing 'run' and 'shutdown' subcommands to not use sudo when invoking virsh. Defaults to 'true'."
+    echo "  --no-looking-glass false    Sets VM_LOOKING_GLASS to false, causing 'run' to start the client. Defaults to 'true' when conditions are met."
+    echo "  --help, -h                  Show this help message."
+    echo ""
+    echo "Additional environment variables:"
+    echo "  VM_MACHINE           Name of the VM to operate on (can also be passed as an argument)."
+    echo "  DEBUG                Defaults to 'false'."
+    echo ""
+    echo "Subcommands:"
+    echo "  prepare [VM_MACHINE]"
+    echo "    Prepares the VM's XML configuration from a base xml at \$VM_XML_DIR/\$VM_MACHINE/\$VM_MACHINE.xml"
+    echo "    (see dump subcommand) as follows:"
+    echo "    - filters out USB devices and block disk devices that are not currently"
+    echo "    connected or available on the host system."
+    echo "    - If VM_CLEAN is true, all disks are removed."
+    echo "    - merges additional XML definitions found in \$VM_XML_DIR/\$VM_MACHINE/*.xml"
+    echo "      - files featuring device definitions are included only when all devices referred to are present"
+    echo "      - The XML definitions can either be fully defined (see vmscript _mergexml --help for more details)"
+    echo "        or the kind of device fragments accepted by virsh attach-device"
+    echo ""
+    echo "  attach [VM_MACHINE]"
+    echo "    Interactively lists available USB devices on the host and allows you to select"
+    echo "    one to attach to the specified VM. Works whether the VM is running or shut down."
+    echo ""
+    echo "  detach [VM_MACHINE]"
+    echo "    Interactively lists USB devices currently defined for (or attached to) the VM"
+    echo "    and allows you to select one to detach. This will remove the device definition"
+    echo "    from the VM's configuration if it's shut down, or live-detach if running."
+    echo ""
+    echo "  info [VM_MACHINE]"
+    echo "    Displays information about the VM, including paths to log files, configuration files,"
+    echo "    hook directories and connected USB devices"
+    echo ""
+    echo "  dump [VM_MACHINE]"
+    echo "    Dumps the current live XML configuration of the VM to its base XML file."
+    echo "    The prepare subcommand can then logically modify this file with other xml modules."
+    echo ""
+    echo "  run [VM_MACHINE]"
+    echo "    Starts the VM:"
+    echo "    - Logs to systemctl (as well as stdout)"
+    echo "    - Invokes the prepare subcommand"
+    echo "    - unmounts any disks defined in the XML from the host system."
+    echo "    - Based on the value of VM_LOOKING_GLASS, starts a display client"
+    echo "    - invokes shutdown subcommand on script exit."
+    echo ""
+    echo "  shutdown [VM_MACHINE]"
+    echo "    Shuts down the VM gracefully."
+    echo "    In an interactive terminal:"
+    echo "    - if the VM doesn't shut down after VM_SHUTDOWN_TRIES, it will prompt to force off (virsh destroy)."
+    echo "    - restarts gvfs-udisks2-volume-monitor."
+    echo ""
+    echo "  install [VM_MACHINE]"
+    echo "    Presents a menu interface for installing various collections of files, such as from a collection "
+    echo "    of QEMU hooks to the VM."
+    echo ""
+  } >&3
 
   (($#)) && exit $1
 }
@@ -303,11 +305,12 @@ EOF
 # overview of machine info
 info() {
   # Reminder of relevant file locations
-  log_message "logs at /var/log/libvirt/qemu/"
-  log_message "conf at /etc/libvirt/libvirtd.conf, hooks at /etc/libvirt/hooks/qemu.d/$VM_MACHINE"
+  log_message "logs at /var/log/libvirt/qemu/ (and in under the [vmscript] tag in sysjournal)."
+  log_message "conf at /etc/libvirt/libvirtd.conf"
+  log_message "hooks at /etc/libvirt/hooks/qemu.d/$VM_MACHINE"
   log_message "xml at /etc/libvirt/qemu/$VM_MACHINE.xml"
   # print information about USB devices connected to the VM.
-  virsh qemu-monitor-command $VM_MACHINE --hmp 'info usb'
+  virsh qemu-monitor-command $VM_MACHINE --hmp 'info usb' 2>/dev/null
 }
 
 dump() {
@@ -317,30 +320,32 @@ dump() {
 shutdown() {
   trap - EXIT SIGINT SIGTERM
   if [ -t 0 ]; then
-    counter=0
+    counter=1
     while is_vm_running; do
       log_message "Shutting down $VM_MACHINE."
-      $sudo timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE
+      timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE
+      sleep $VM_WAIT
+      timeout 1 virsh shutdown $VM_MACHINE
 
-      if [[ $? -ne 0 || $counter -eq $VM_SHUTDOWN_TRIES ]]; then
-        print "After $(( counter * (VM_WAIT + VM_COMMAND_TIMEOUT) + VM_COMMAND_TIMEOUT )) seconds, $VM_MACHINE still has not shut down. Force off? [Y/n] "
+      if is_vm_running && (( counter == VM_SHUTDOWN_TRIES )); then
+        print "After $(( counter * (VM_WAIT + VM_COMMAND_TIMEOUT) )) seconds, $VM_MACHINE still has not shut down."
+        print "Force off [Y] or wait some more [n]? "
         read -r answer
         if [[ -z "$answer" || $answer != ${answer#[Yy]} ]]; then
-          $sudo virsh destroy $VM_MACHINE
+          virsh destroy $VM_MACHINE
           exit 0
         fi
       fi
 
-      sleep $VM_WAIT
       ((counter++))
     done
 
   else
-    $sudo timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE
+    timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE
 
     sleep $VM_WAIT
     if is_vm_running; then
-      $sudo virsh destroy $VM_MACHINE
+      virsh destroy $VM_MACHINE
       sleep $VM_WAIT
       if is_vm_running; then
         notify "VM could not be forced off"
@@ -350,26 +355,26 @@ shutdown() {
   fi
   
   sleep $VM_WAIT
-  notify "VM stopped" "$($sudo virsh list --all)"
+  notify "VM stopped" "$(virsh list --all)"
 
-  if [ -t 0 ] && systemctl --user status gvfs-udisks2-volume-monitor &>/dev/null; then
-    systemctl --user restart gvfs-udisks2-volume-monitor
+  if [ -t 0 ] && $nosudo systemctl --user status gvfs-udisks2-volume-monitor &>/dev/null; then
+    $nosudo systemctl --user restart gvfs-udisks2-volume-monitor
   fi
 
   log_message "Script completed or interrupted."
   exit
 }
 
-# a custom script to easily start a vm by running the prepare subcommand, unmounting all disks, starting looking-glass, and handling cleanup
+# A convenience script to start a vm by running the prepare subcommand, unmounting all disks, starting looking-glass, and handling cleanup
 run() {
 
   log_message "Starting $VM_MACHINE."
-  $sudo timeout $VM_COMMAND_TIMEOUT virsh list --all || exit 1
+  timeout $VM_COMMAND_TIMEOUT virsh list --all || exit 1
 
   if ! [ -t 0 ]; then
     log_message "Running in a non-interactive terminal with VM_CLEAN=$VM_CLEAN."
   fi
-  $sudo DEBUG=$DEBUG VM_CLEAN=$VM_CLEAN $SCRIPT prepare $VM_MACHINE
+  DEBUG=$DEBUG VM_CLEAN=$VM_CLEAN $SCRIPT prepare $VM_MACHINE
   unmount_xml_disks $XML_PATH
 
   if is_vm_running; then
@@ -380,10 +385,10 @@ run() {
       exit 0
     fi
   else
-    $sudo timeout $VM_COMMAND_TIMEOUT virsh start $VM_MACHINE
+    timeout $VM_COMMAND_TIMEOUT virsh start $VM_MACHINE
   fi
 
-  if [ $? -ne 0 ]; then
+  if ! is_vm_running; then
     notify "Failed to start vm"
     exit 1
   fi
@@ -395,22 +400,22 @@ run() {
   done
   notify "VM started"
 
-  # technically this should be longer as we're waiting for vm startup
-  sleep $VM_WAIT
-
-  if [ -t 0 ] && $VM_LOOKING_GLASS; then
-    # Run looking-glass-client in workspace 5
-    wmctrl -s 5
-    log_message "Running looking-glass-client in fullscreen mode."
-    looking-glass-client -FXML_DIR
+  if [ -t 0 ]; then
+    if $VM_LOOKING_GLASS; then
+      sleep $(( VM_WAIT * 2 )) # Arbitrary period to reduce the period between showing looking-glass and the OS finishing boot
+      # Run looking-glass-client in workspace 9
+      $nosudo wmctrl -s 9
+      log_message "Running looking-glass-client in fullscreen mode."
+      $nosudo looking-glass-client -F
+    fi
 
     while is_vm_running; do
-      printf "Client closed. Restart client? [Y/n]: "
+      printf "Shutdown? [y/N]: "
       read -r ans
-      if [[ $ans == "" || $ans != ${ans#[Yy]} ]]; then
-        looking-glass-client -F
-      else
+      if [[ $ans != ${ans#[Yy]} ]]; then
         break
+      else
+        $VM_LOOKING_GLASS && $nosudo looking-glass-client -F
       fi
     done
   fi
@@ -443,8 +448,8 @@ install() {
   done
 
   # Prompt and split input
-  read -A choices
   echo -n "Enter hook numbers to install (space-separated): "
+  read -A choices
 
   for n in ${choices[@]}; do
     case ${hooks[n]} in
@@ -488,7 +493,8 @@ install() {
         systemctl enable unblacklist-nvidia-postboot.service
         ;;
       *)
-        echo "Invalid selection: $n"
+        echo "Invalid selection: $n" >&2
+        usage 1
         ;;
     esac
   done
@@ -496,15 +502,15 @@ install() {
 
 main() {
   # logging
+  exec 3>&1 4>&2
   if [ ! -t 1 ]; then
-    # stdout is not a tty. Redirect stdout/stderr to both logger and original TTY
-    exec 3>&1 4>&2
+    # stdout is not a tty. Log stdout/stderr.
 
     # Start coprocess for logger
     coproc logger --tag "${PROG:-vmscript}"
 
-    exec > >(tee /dev/fd/3 > /dev/null >&p)
-    exec 2> >(tee /dev/fd/4 > /dev/null >&p)
+    exec > >(tee /dev/fd/3 >&p)
+    exec 2> >(tee /dev/fd/4 >&p)
   else
     [[ $DEBUG == true ]] && set -x
   fi
@@ -531,7 +537,7 @@ main() {
                   echo "Missing argument for --xml-dir" >&2
                   exit 1
               fi
-              XML_DIR="$2"
+              export XML_DIR="$2"
               shift 2
               ;;
           --wait)
@@ -539,29 +545,25 @@ main() {
                   echo "Missing argument for --wait" >&2
                   exit 1
               fi
-              VM_WAIT="$2"
+              export VM_WAIT="$2"
               shift 2
               ;;
           --command-timeout)
               if [ "$#" -lt 2 ]; then echo "Missing argument for --command-timeout" >&2; exit 1; fi
-              VM_COMMAND_TIMEOUT="$2"
+              export VM_COMMAND_TIMEOUT="$2"
               shift 2
               ;;
           --shutdown-tries)
               if [ "$#" -lt 2 ]; then echo "Missing argument for --shutdown-tries" >&2; exit 1; fi
-              VM_SHUTDOWN_TRIES="$2"
+              export VM_SHUTDOWN_TRIES="$2"
               shift 2
               ;;
           --clean)
-              VM_CLEAN=true
-              shift 1
-              ;;
-          --no-run-with-sudo)
-              VM_RUN_WITH_SUDO=false
+              export VM_CLEAN=true
               shift 1
               ;;
           --no-looking-glass)
-              VM_LOOKING_GLASS=false
+              export VM_LOOKING_GLASS=false
               shift 1
               ;;
           -h|--help)
@@ -594,15 +596,17 @@ main() {
   : ${VM_WAIT:=5} # seconds to wait between checking status, such as whether vm is running
   : ${VM_COMMAND_TIMEOUT:=30} # seconds to wait for virsh commands, such as listing, startup
   : ${VM_SHUTDOWN_TRIES:=2}
-  [[ $VM_RUN_WITH_SUDO != false ]] && VM_RUN_WITH_SUDO=true
-  sudo=()
 
+  # run and shutdown
+  [[ $VM_RUN_WITH_SUDO != (true|false) ]] && VM_RUN_WITH_SUDO=true
   : ${VM_LOOKING_GLASS:=true}
   if [[ "$VM_LOOKING_GLASS" == "true" ]]; then
     command -v looking-glass-client >/dev/null && VM_LOOKING_GLASS=true || VM_LOOKING_GLASS=false
   else
     VM_LOOKING_GLASS=false
   fi
+
+  [[ -n $SUDO_USER ]] && nosudo=(sudo -u $SUDO_USER DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS) || nosudo=()
 
   ### BEGIN
   case $cmd in
@@ -611,10 +615,10 @@ main() {
     detach) detach_usb "$@" ;;
     info) info "$@" ;;
     run)
-      $VM_RUN_WITH_SUDO && sudo=sudo
+      [[ $VM_RUN_WITH_SUDO == true ]] && [[ $EUID != 0 ]] && exec sudo DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS $SCRIPT run $VM_MACHINE
       run "$@" ;;
     shutdown)
-      $VM_RUN_WITH_SUDO && sudo=sudo
+      [[ $VM_RUN_WITH_SUDO == true ]] && [[ $EUID != 0 ]] && exec sudo DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS $SCRIPT shutdown $VM_MACHINE
       shutdown "$@" ;;
     install)
       install "$@"

@@ -11,3 +11,5 @@ virsh nodedev-reattach $VIRSH_GPU_AUDIO
 modprobe -r vfio_pci
 modprobe -r vfio_iommu_type1
 modprobe -r vfio
+
+systemctl start unblacklist-nvidia-postboot || :
