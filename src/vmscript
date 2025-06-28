@@ -29,7 +29,7 @@ unmount_disk() {
   local disk=$1
   # Try all partitions to unmount
   for part in $disk*; do
-    output=$(umount $part) 
+    output="$(umount $part)"
     if ! (($?)) && ! grep -iE "not mounted|no such file|no mount point" <<<$output; then
       log_message "Couldn't unmount $disk @ $part"
       break
@@ -56,7 +56,7 @@ check_xml_devices() {
 
 unmount_xml_disks() {
   local device_paths device_path
-  device_paths="$(xmlstarlet sel -t -m "/domain/devices/disk/source/@dev" -v "source/@dev" -n $1 2>/dev/null)"
+  device_paths="$(xmlstarlet sel -t -m "/domain/devices/disk/source" -v "@dev" -n $1 2>/dev/null)"
   if [[ -z $device_paths ]]; then
       return 0
   fi
@@ -323,9 +323,10 @@ shutdown() {
     counter=1
     while is_vm_running; do
       log_message "Shutting down $VM_MACHINE."
-      timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE
+      timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE # maybe check exit code is better here
       sleep $VM_WAIT
       timeout 1 virsh shutdown $VM_MACHINE
+      sleep $VM_WAIT
 
       if is_vm_running && (( counter == VM_SHUTDOWN_TRIES )); then
         print "After $(( counter * (VM_WAIT + VM_COMMAND_TIMEOUT) )) seconds, $VM_MACHINE still has not shut down."
@@ -379,26 +380,23 @@ run() {
 
   if is_vm_running; then
     log_message "$VM_MACHINE already running!"
-    printf "Exit? [Y/n]: "
+    printf "Do nothing and exit? [Y/n]: "
     read -r ans
     if [[ $ans == "" || $ans != ${ans#[Yy]} ]]; then
       exit 0
     fi
   else
     timeout $VM_COMMAND_TIMEOUT virsh start $VM_MACHINE
-  fi
-
-  if ! is_vm_running; then
-    notify "Failed to start vm"
-    exit 1
+    sleep $VM_WAIT
+    if ! is_vm_running; then
+      notify "Failed to start vm" # this may miss cleanup if vm takes too long to start. Maybe some way to check virsh responsiveness?
+      exit 1
+    else
+      notify "VM started"
+    fi
   fi
 
   trap shutdown EXIT SIGINT SIGTERM
-
-  while ! is_vm_running; do
-    sleep $VM_WAIT
-  done
-  notify "VM started"
 
   if [ -t 0 ]; then
     if $VM_LOOKING_GLASS; then
