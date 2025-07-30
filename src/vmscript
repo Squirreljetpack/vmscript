@@ -8,7 +8,7 @@ log_message() {
 
 notify () {
   if command -v notify-send >/dev/null; then
-    $nosudo DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS notify-send $@
+    $nosudo notify-send $@
   else
     echo $@
   fi
@@ -29,7 +29,7 @@ unmount_disk() {
   local disk=$1
   # Try all partitions to unmount
   for part in $disk*; do
-    output="$(umount $part)"
+    output="$(umount $part 2>/dev/null)"
     if ! (($?)) && ! grep -iE "not mounted|no such file|no mount point" <<<$output; then
       log_message "Couldn't unmount $disk @ $part"
       break
@@ -130,6 +130,7 @@ usage() {
     echo "    - unmounts any disks defined in the XML from the host system."
     echo "    - Based on the value of VM_LOOKING_GLASS, starts a display client"
     echo "    - invokes shutdown subcommand on script exit."
+    echo "    Note that if VM_MACHINE environment variable is set, this subcommand can be ommitted."
     echo ""
     echo "  shutdown [VM_MACHINE]"
     echo "    Shuts down the VM gracefully."
@@ -188,10 +189,10 @@ prepare() {
       echo
   fi
 
-  virsh define $XML_PATH --validate > /dev/null || invalid_xml_err "after filtering disks."
+  virsh define $XML_PATH --validate &> /dev/null || invalid_xml_err "after filtering disks."
 
   if ! $VM_CLEAN; then
-    echo \# Checking xmls in "$VM_XML_DIR/$VM_MACHINE"...
+    echo \# Loading xmls from "$VM_XML_DIR/$VM_MACHINE"...
     for devicexml in "$VM_XML_DIR/$VM_MACHINE"/*.xml(N); do
         [[ $devicexml == $XML_BASE_PATH || $devicexml == $XML_PATH ]] && continue
         if check_xml_devices $devicexml; then
@@ -214,7 +215,7 @@ prepare() {
     echo
   fi
 
-  virsh define $XML_PATH
+  virsh define $XML_PATH && echo \# XML definition complete
 }
 
 # a simple cli menu for attaching usb devices (including while running!)
@@ -358,15 +359,13 @@ shutdown() {
   sleep $VM_WAIT
   notify "VM stopped" "$(virsh list --all)"
 
-  if [ -t 0 ] && $nosudo systemctl --user status gvfs-udisks2-volume-monitor &>/dev/null; then
-    $nosudo systemctl --user restart gvfs-udisks2-volume-monitor
-  fi
+  [ -t 0 ] && $nosudo systemctl --user restart gvfs-udisks2-volume-monitor
 
   log_message "Script completed or interrupted."
   exit
 }
 
-# A convenience script to start a vm by running the prepare subcommand, unmounting all disks, starting looking-glass, and handling cleanup
+# A script to start a vm by running the prepare subcommand, unmounting all disks, starting looking-glass, and handling cleanup
 run() {
 
   log_message "Starting $VM_MACHINE."
@@ -376,6 +375,7 @@ run() {
     log_message "Running in a non-interactive terminal with VM_CLEAN=$VM_CLEAN."
   fi
   DEBUG=$DEBUG VM_CLEAN=$VM_CLEAN $SCRIPT prepare $VM_MACHINE
+  echo \# Unmounting disks
   unmount_xml_disks $XML_PATH
 
   if is_vm_running; then
@@ -386,6 +386,7 @@ run() {
       exit 0
     fi
   else
+    echo \# Starting VM
     timeout $VM_COMMAND_TIMEOUT virsh start $VM_MACHINE
     sleep $VM_WAIT
     if ! is_vm_running; then
@@ -403,7 +404,7 @@ run() {
       sleep $(( VM_WAIT * 2 )) # Arbitrary period to reduce the period between showing looking-glass and the OS finishing boot
       # Run looking-glass-client in workspace 9
       $nosudo wmctrl -s 9
-      log_message "Running looking-glass-client in fullscreen mode."
+      echo "# Starting looking-glass-client"
       $nosudo looking-glass-client -F
     fi
 
@@ -513,12 +514,16 @@ main() {
     [[ $DEBUG == true ]] && set -x
   fi
 
-  (($#)) || usage 1
+  if (($#)); then
+    local cmd=$1
+    shift
+  elif [[ -n $VM_MACHINE ]]; then
+    local cmd=run # run as the default subcommand
+  else
+    usage 1
+  fi
 
-  local cmd=$1
-  shift
-
-  # provide an access point to the mergexml helper script
+  # provide an access to the mergexml helper script
   if [[ $cmd == _mergexml ]]; then
     $SCRIPT_DIR/mergexml.py $@
     exit
@@ -575,8 +580,6 @@ main() {
   done
   set -- ${args[@]}
 
-  [[ -z "$cmd" ]] && usage 1
-
   if [[ -n "$1" ]]; then
     VM_MACHINE="$1"
     shift 1
@@ -620,9 +623,6 @@ main() {
       shutdown "$@" ;;
     install)
       install "$@"
-    ;;
-    _mergexml)
-      install_hooks "$@"
     ;;
     help|-h|--help)
       usage 0
