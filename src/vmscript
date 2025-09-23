@@ -29,10 +29,9 @@ unmount_disk() {
   local disk=$1
   # Try all partitions to unmount
   for part in $disk*; do
-    output="$(umount $part 2>/dev/null)"
-    if ! (($?)) && ! grep -iE "not mounted|no such file|no mount point" <<<$output; then
-      log_message "Couldn't unmount $disk @ $part"
-      break
+    output="$(umount $part 2>&1)"
+    if (($? != 0)) && ! grep -iE "not mounted|no such file|no mount point" <<<$output; then
+      log_message "Couldn't unmount $part: $output"
       return 1
     fi
   done
@@ -152,45 +151,6 @@ prepare() {
   [[ -e $XML_BASE_PATH ]] || echo "default XML not found at $XML_BASE_PATH"
   cp -f $XML_BASE_PATH $XML_PATH
 
-  usbs=($(
-    xmlstarlet sel -t -m "/domain/devices/hostdev [@type='usb']" -v "source/vendor/@id" -o ":" -v "source/product/@id" -nl $XML_BASE_PATH |
-        sed -e 's/0x\([0-9a-f]*\)/\1/g'
-  ))
-
-  if (( ${#usbs[@]} )); then
-    echo \# Filtering usbs...
-    for usb in ${usbs[@]}; do
-        lsusb | grep -q $usb || {
-            notify "USB device $usb not connected right now, removing..."
-            vendor=$(echo $usb | cut -d':' -f1)
-            product=$(echo $usb | cut -d':' -f2)
-            xmlstarlet ed -O -d \"/domain/devices/hostdev[source/vendor/@id='0x$vendor'][source/product/@id='0x$product']\" $XML_PATH >$XML_PATH.b && 
-            mv $XML_PATH.b $XML_PATH
-        }
-    done
-    echo
-  fi
-
-  virsh define $XML_PATH --validate > /dev/null || invalid_xml_err "after filtering usbs."
-
-  disk_paths=($(xmlstarlet sel -t -m "/domain/devices/disk[@type='block']" -v "source/@dev" -nl $XML_BASE_PATH))
-  if (( ${#disk_paths[@]} )); then
-      echo \# Filtering disks...
-      for disk in ${disk_paths[@]}; do
-          # In clean mode, we run without any disks
-          if $VM_CLEAN || [[ ! -e "$disk" ]]; then
-              xmlstarlet ed -O -d "/domain/devices/disk[@type='block'][source/@dev='$disk']" $XML_PATH >$XML_PATH.b &&
-              mv $XML_PATH.b $XML_PATH
-              echo "Removed $disk"
-          else
-              echo "Kept $disk"
-          fi
-      done
-      echo
-  fi
-
-  virsh define $XML_PATH --validate &> /dev/null || invalid_xml_err "after filtering disks."
-
   if ! $VM_CLEAN; then
     echo \# Loading xmls from "$VM_XML_DIR/$VM_MACHINE"...
     for devicexml in "$VM_XML_DIR/$VM_MACHINE"/*.xml(N); do
@@ -215,7 +175,48 @@ prepare() {
     echo
   fi
 
-  virsh define $XML_PATH && echo \# XML definition complete
+  virsh define $XML_PATH --validate &> /dev/null || invalid_xml_err "after loading modules."
+  
+  usbs=($(
+    xmlstarlet sel -t -m "/domain/devices/hostdev [@type='usb']" -v "source/vendor/@id" -o ":" -v "source/product/@id" -nl $XML_PATH |
+        sed -e 's/0x\([0-9a-f]*\)/\1/g'
+  ))
+
+  if (( ${#usbs[@]} )); then
+    echo \# Filtering usbs...
+    for usb in ${usbs[@]}; do
+        lsusb | grep -q $usb || {
+            notify "USB device $usb not connected right now, removing..."
+            vendor=$(echo $usb | cut -d':' -f1)
+            product=$(echo $usb | cut -d':' -f2)
+            xmlstarlet ed -O -d \"/domain/devices/hostdev[source/vendor/@id='0x$vendor'][source/product/@id='0x$product']\" $XML_PATH >$XML_PATH.b && 
+            mv $XML_PATH.b $XML_PATH
+        }
+    done
+    echo
+  fi
+
+  virsh define $XML_PATH --validate > /dev/null || invalid_xml_err "after filtering usbs."
+
+  disk_paths=($(xmlstarlet sel -t -m "/domain/devices/disk[@type='block']" -v "source/@dev" -nl $XML_PATH))
+  if (( ${#disk_paths[@]} )); then
+      echo \# Filtering disks...
+      for disk in ${disk_paths[@]}; do
+          # In clean mode, we run without any disks
+          if $VM_CLEAN || [[ ! -e "$disk" ]]; then
+              xmlstarlet ed -O -d "/domain/devices/disk[@type='block'][source/@dev='$disk']" $XML_PATH >$XML_PATH.b &&
+              mv $XML_PATH.b $XML_PATH
+              echo "Removed $disk"
+          else
+              echo "Kept $disk"
+          fi
+      done
+      echo
+  fi
+
+  virsh define $XML_PATH --validate &> /dev/null || invalid_xml_err "after filtering disks."
+  
+  echo \# XML definition complete
 }
 
 # a simple cli menu for attaching usb devices (including while running!)
@@ -321,16 +322,19 @@ dump() {
 shutdown() {
   trap - EXIT SIGINT SIGTERM
   if [ -t 0 ]; then
-    counter=1
-    while is_vm_running; do
-      log_message "Shutting down $VM_MACHINE."
-      timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE # maybe check exit code is better here
-      sleep $VM_WAIT
-      timeout 1 virsh shutdown $VM_MACHINE
-      sleep $VM_WAIT
+    local running=true;
+    while $running; do
+      repeat $VM_SHUTDOWN_TRIES; do
+        log_message "Shutting down $VM_MACHINE."
+        timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE &&
+          sleep $((VM_WAIT * 2)) # on success, we should give it some extra grace
+        sleep $VM_WAIT
 
-      if is_vm_running && (( counter == VM_SHUTDOWN_TRIES )); then
-        print "After $(( counter * (VM_WAIT + VM_COMMAND_TIMEOUT) )) seconds, $VM_MACHINE still has not shut down."
+        ! is_vm_running && running=false && break
+      done
+
+      if $running; then
+        print "After $VM_SHUTDOWN_TRIES tries, $VM_MACHINE still has not shut down."
         print "Force off [Y] or wait some more [n]? "
         read -r answer
         if [[ -z "$answer" || $answer != ${answer#[Yy]} ]]; then
@@ -338,15 +342,19 @@ shutdown() {
           exit 0
         fi
       fi
-
-      ((counter++))
     done
 
   else
-    timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE
+    repeat $VM_SHUTDOWN_TRIES; do
+      log_message "Shutting down $VM_MACHINE."
+      timeout $VM_COMMAND_TIMEOUT virsh shutdown $VM_MACHINE &&
+        sleep $((VM_WAIT * 2)) # on success, we should give it some extra grace
+      sleep $VM_WAIT
 
-    sleep $VM_WAIT
-    if is_vm_running; then
+      ! is_vm_running && running=false && break
+    done
+
+    if $running; then
       virsh destroy $VM_MACHINE
       sleep $VM_WAIT
       if is_vm_running; then
@@ -356,7 +364,6 @@ shutdown() {
     fi
   fi
   
-  sleep $VM_WAIT
   notify "VM stopped" "$(virsh list --all)"
 
   [ -t 0 ] && $nosudo systemctl --user restart gvfs-udisks2-volume-monitor
@@ -388,13 +395,17 @@ run() {
   else
     echo \# Starting VM
     timeout $VM_COMMAND_TIMEOUT virsh start $VM_MACHINE
-    sleep $VM_WAIT
-    if ! is_vm_running; then
-      notify "Failed to start vm" # this may miss cleanup if vm takes too long to start. Maybe some way to check virsh responsiveness?
+    running=false
+    repeat $VM_STARTUP_TRIES; do
+      sleep $VM_WAIT
+      is_vm_running &&
+      running=true &&
+      break
+    done
+    $running || {
+      notify "Failed to start vm: $running" # this may miss cleanup if vm takes too long to start. Maybe some way to check virsh responsiveness?
       exit 1
-    else
-      notify "VM started"
-    fi
+    }
   fi
 
   trap shutdown EXIT SIGINT SIGTERM
@@ -597,6 +608,7 @@ main() {
   : ${VM_WAIT:=5} # seconds to wait between checking status, such as whether vm is running
   : ${VM_COMMAND_TIMEOUT:=30} # seconds to wait for virsh commands, such as listing, startup
   : ${VM_SHUTDOWN_TRIES:=2}
+  : ${VM_STARTUP_TRIES:=5}
 
   # run and shutdown
   [[ $VM_RUN_WITH_SUDO != (true|false) ]] && VM_RUN_WITH_SUDO=true
